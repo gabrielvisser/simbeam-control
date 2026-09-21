@@ -304,6 +304,23 @@ final class HIDController: @unchecked Sendable {
     }
   }
 
+  // Simulator.app's Toggle Software Keyboard sends legacy button source 0x3f0
+  // (confirmed in Xcode 26.6). This is distinct from connecting a keyboard.
+  // It is a toggle, not an idempotent visibility setter: callers must not retry.
+  func toggleSoftwareKeyboard() {
+    queue.async { [weak self] in
+      guard let self else { return }
+      self.perform([
+        ScheduledTouch(delay: 0, data: buttonData(
+          source: 0x3f0, target: UInt32(ButtonEventTargetHardware),
+          direction: UInt32(ButtonEventTypeDown), keyCode: 0)),
+        ScheduledTouch(delay: 0.01, data: buttonData(
+          source: 0x3f0, target: UInt32(ButtonEventTargetHardware),
+          direction: UInt32(ButtonEventTypeUp), keyCode: 0)),
+      ])
+    }
+  }
+
   func shake() {
     queue.async { [udid] in
       let process = Process()

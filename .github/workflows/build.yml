@@ -26,6 +26,12 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Test stdin control contract
+        run: |
+          mkdir -p .build/tests
+          swiftc Sources/ControlInput.swift Tests/ControlInputTests.swift -o .build/tests/control-input
+          .build/tests/control-input
+
       - name: Static analysis
         run: |
           xcodebuild \

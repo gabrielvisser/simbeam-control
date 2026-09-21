@@ -84,6 +84,8 @@ final class ControlInput {
         }
         let shift = (object["shift"] as? Bool) ?? false
         hid.key(usage: UInt32(usage), shift: shift)
+      case "toggle_software_keyboard":
+        hid.toggleSoftwareKeyboard()
       default:
         throw ControlError.unsupported(type)
       }

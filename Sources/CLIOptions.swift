@@ -11,8 +11,9 @@ import Foundation
 ///   2 — streamed touch (down/move/up) and app_switcher.
 ///   3 — bounded cold-boot framebuffer wait (`--startup-timeout-ms`) and typed
 ///       JSON startup failures on stderr.
+///   4 — toggle_software_keyboard.
 enum ControlProtocol {
-  static let version = 3
+  static let version = 4
 }
 
 struct CLIOptions {

@@ -30,7 +30,7 @@ Invocation:
 ```sh
 simbeam-control --udid <UDID> [--fps 30] [--keyframe-interval-ms 2000] \
   [--bitrate 4000000] [--scale 1.0] [--startup-timeout-ms 15000]
-simbeam-control --protocol   # print the control protocol version (3) and exit
+simbeam-control --protocol   # print the control protocol version (4) and exit
 ```
 
 stdout is binary-only. Each record is:
@@ -48,7 +48,7 @@ synthetic frame counter.
 stderr carries the startup handshake and logs. The first line after successful attachment is JSON:
 
 ```json
-{"ready":true,"protocol":3,"width":402,"height":874,"scale":3,"encoded_width":300,"encoded_height":654}
+{"ready":true,"protocol":4,"width":402,"height":874,"scale":3,"encoded_width":300,"encoded_height":654}
 ```
 
 Rotation or a genuine framebuffer resize emits another handshake, forces an IDR, and updates SPS
@@ -58,14 +58,14 @@ A cold-boot framebuffer wait announces itself first, so the handshake is not alw
 stderr line:
 
 ```json
-{"waiting":"framebuffer","protocol":3,"timeout_ms":15000}
+{"waiting":"framebuffer","protocol":4,"timeout_ms":15000}
 ```
 
 Any failure before the handshake is one JSON line with a stable `error` code and a `retryable`
 flag, followed by a non-zero exit (`2` for bad arguments, `1` otherwise):
 
 ```json
-{"ready":false,"protocol":3,"error":"display_not_ready","message":"...","retryable":true}
+{"ready":false,"protocol":4,"error":"display_not_ready","message":"...","retryable":true}
 ```
 
 Codes are `invalid_arguments`, `core_simulator_unavailable`, `device_not_found`,
@@ -84,12 +84,17 @@ stdin accepts newline-delimited JSON:
 {"type":"touch","action":"move","x":190.0,"y":540.0}
 {"type":"touch","action":"up","x":120.0,"y":210.0}
 {"type":"app_switcher"}
+{"type":"toggle_software_keyboard"}
 {"type":"shake"}
 {"type":"keyframe"}
 {"type":"quality","bitrate":2500000,"fps":24}
 ```
 
 The process stops cleanly on stdin EOF, SIGINT, or SIGTERM.
+
+`toggle_software_keyboard` (protocol 4) sends the Simulator software-keyboard toggle event.
+It is not idempotent and must not be retried automatically. It does not filter `key` commands
+or change settings on attachment/disconnect. See README for the contract and validation.
 
 ## Architecture
 

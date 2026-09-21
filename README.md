@@ -65,7 +65,7 @@ otherwise manage devices.
 The process exits when stdin closes or it receives SIGINT/SIGTERM. Stdout is always binary video;
 logs and the startup handshake are written to stderr.
 
-`simbeam-control --protocol` prints the control protocol version (currently `3`) and exits. The
+`simbeam-control --protocol` prints the control protocol version (currently `4`) and exits. The
 daemon preflights this to refuse a helper older than it requires; a binary that predates the flag
 exits non-zero and counts as version 1 (no streamed touch, no app_switcher).
 
@@ -82,7 +82,7 @@ Once the wait starts, one JSON line announces it, so the ready handshake is not 
 stderr line on a cold boot:
 
 ```json
-{"waiting":"framebuffer","protocol":3,"timeout_ms":15000}
+{"waiting":"framebuffer","protocol":4,"timeout_ms":15000}
 ```
 
 SIGINT or SIGTERM during the wait ends the process immediately rather than at the deadline: it
@@ -97,7 +97,7 @@ then the process exits non-zero (`2` for bad arguments, which also print the usa
 otherwise):
 
 ```json
-{"ready":false,"protocol":3,"error":"display_not_ready","message":"the simulator display produced no framebuffer IOSurface within 15000 ms","retryable":true}
+{"ready":false,"protocol":4,"error":"display_not_ready","message":"the simulator display produced no framebuffer IOSurface within 15000 ms","retryable":true}
 ```
 
 `error` is a stable code; `retryable` says whether the same invocation is worth retrying unchanged.
@@ -117,7 +117,7 @@ otherwise):
 The first stderr line after successful attachment is JSON:
 
 ```json
-{"ready":true,"protocol":3,"width":402,"height":874,"scale":3,"encoded_width":1206,"encoded_height":2622}
+{"ready":true,"protocol":4,"width":402,"height":874,"scale":3,"encoded_width":1206,"encoded_height":2622}
 ```
 
 `width` and `height` are Simulator points, while `scale` is the native display scale.
@@ -151,6 +151,7 @@ stdin is newline-delimited JSON, one object per line. Coordinates are in Simulat
 {"type":"touch","action":"up","x":120.0,"y":210.0}
 {"type":"home"}
 {"type":"app_switcher"}
+{"type":"toggle_software_keyboard"}
 {"type":"key","usage":40,"shift":false}
 {"type":"shake"}
 {"type":"keyframe"}
@@ -170,6 +171,16 @@ SimulatorKit's Indigo HID path: `home` presses the hardware Home button; `app_sw
 running-apps switcher via a double Home press; `key` presses a USB HID
 keyboard usage code (page 0x07) with an optional `shift`, so the simulator's active hardware layout
 selects the glyph (the caller maps its key names to usage codes).
+
+`toggle_software_keyboard` (protocol 4) sends the dedicated Indigo hardware-button event
+(source `0x3f0`, target `0x33`, down then up) used by Simulator.app's **Toggle Software
+Keyboard** action. It is separate from the hardware-keyboard setting. This command is a
+**toggle**, not a visibility setter: send it once over a reliable channel, without automatic
+retries or remembered client-side visibility. Focus a text field first. Delivery failures use
+the existing HID diagnostic; there is no visibility acknowledgement. It does not filter `key`
+commands or change settings on attachment/disconnect. Live testing on Xcode 26.6 / iOS 26.5
+(iPhone 17 Pro, Safari address field) confirmed showing the keyboard without a focus change; the user confirmed the subsequent
+toggle hid it.
 
 ## idb attribution
 
