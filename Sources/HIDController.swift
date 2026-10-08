@@ -9,6 +9,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ObjectiveC
+import XPC
 @preconcurrency import CoreSimulator
 import SimulatorApp
 
@@ -75,6 +76,8 @@ final class HIDController: @unchecked Sendable {
   private let screenScale: Float
   private let messageBuilder: MouseMessageBuilder
   private var client: AnyObject?
+  private let homeDevice: SimDevice
+  private var homeTransport: SimulatorHomeTransport?
   // last point of an in-progress streamed touch; non-nil means the finger is
   // down. Guarded by `queue`.
   private var streamedTouchPoint: CGPoint?
@@ -85,9 +88,14 @@ final class HIDController: @unchecked Sendable {
     displayInfo: SimulatorDisplayInfo,
     developerDirectory: String
   ) throws {
-    let simulatorKitPath = developerDirectory + "/Library/PrivateFrameworks/SimulatorKit.framework"
-    guard let bundle = Bundle(path: simulatorKitPath) else {
-      throw HIDError.simulatorKitUnavailable("not found at \(simulatorKitPath)")
+    let developerURL = URL(fileURLWithPath: developerDirectory, isDirectory: true)
+    let simulatorKitPaths = [
+      developerURL.appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework").path,
+      developerURL.deletingLastPathComponent()
+        .appendingPathComponent("SharedFrameworks/SimulatorKit.framework").path,
+    ]
+    guard let bundle = simulatorKitPaths.compactMap({ Bundle(path: $0) }).first else {
+      throw HIDError.simulatorKitUnavailable("not found at \(simulatorKitPaths.joined(separator: ", "))")
     }
     if !bundle.isLoaded {
       do {
@@ -118,6 +126,7 @@ final class HIDController: @unchecked Sendable {
         (clientError as? NSError)?.localizedDescription ?? String(describing: clientError))
     }
 
+    self.homeDevice = device
     self.client = client
     self.udid = udid
     self.pointSize = CGSize(width: displayInfo.pointWidth, height: displayInfo.pointHeight)
@@ -134,6 +143,7 @@ final class HIDController: @unchecked Sendable {
         perform([ScheduledTouch(delay: 0, data: touchData(direction: .up, x: point.x, y: point.y))])
         streamedTouchPoint = nil
       }
+      homeTransport = nil
       client = nil
     }
   }
@@ -246,9 +256,25 @@ final class HIDController: @unchecked Sendable {
     }
   }
 
+  private func sendModernHome(count: Int) -> Bool {
+    // Restrict the new transport to the runtime family verified here; older runtimes retain their existing input path.
+    guard homeDevice.runtimeIdentifier.contains("iOS-27") else { return false }
+    do {
+      if homeTransport == nil {
+        homeTransport = try SimulatorHomeTransport(device: homeDevice)
+      }
+      homeTransport?.press(count: count)
+    } catch {
+      Log.message("Home input failed: \(error.localizedDescription)")
+      homeTransport = nil
+    }
+    return true
+  }
+
   func home() {
     queue.async { [weak self] in
       guard let self else { return }
+      if self.sendModernHome(count: 1) { return }
       self.perform([
         ScheduledTouch(delay: 0, data: buttonData(
           source: UInt32(ButtonEventSourceHomeButton),
@@ -268,6 +294,7 @@ final class HIDController: @unchecked Sendable {
   func appSwitcher() {
     queue.async { [weak self] in
       guard let self else { return }
+      if self.sendModernHome(count: 2) { return }
       var events: [ScheduledTouch] = []
       for press in 0..<2 {
         events.append(ScheduledTouch(delay: press == 0 ? 0 : 0.05, data: buttonData(
@@ -452,4 +479,104 @@ final class HIDController: @unchecked Sendable {
 private struct ScheduledTouch {
   let delay: TimeInterval
   let data: Data
+}
+
+private final class SimulatorHomeTransport {
+  private typealias MakeEndpoint = @convention(c) (mach_port_t, UInt64, UInt64) -> Unmanaged<AnyObject>?
+  private typealias MakeConnection = @convention(c) (xpc_object_t) -> Unmanaged<AnyObject>?
+  private typealias EnableSimulator = @convention(c) (xpc_connection_t) -> Void
+  private let connection: xpc_connection_t
+  private let replyQueue = DispatchQueue(label: "com.simbeam.control.home.reply")
+  private static let service = "com.apple.coredevice.feature.remote.hid.digitizer"
+
+  init(device: SimDevice) throws {
+    guard let handle = dlopen(nil, RTLD_NOW) else {
+      throw HIDError.simulatorKitUnavailable("DTUHID symbols unavailable")
+    }
+    defer { dlclose(handle) }
+    guard let endpointSymbol = dlsym(handle, "xpc_endpoint_create_mach_port_4sim"),
+          let connectionSymbol = dlsym(handle, "xpc_connection_create_from_endpoint"),
+          let simulatorSymbol = dlsym(handle, "xpc_connection_enable_sim2host_4sim") else {
+      throw HIDError.simulatorKitUnavailable("DTUHID connection symbols unavailable")
+    }
+    var error: NSError?
+    let port = device.lookup(Self.service, error: &error)
+    guard port != MACH_PORT_NULL else {
+      throw error ?? NSError(domain: "com.simbeam.control.home", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "DTUHID service lookup failed"])
+    }
+    let makeEndpoint = unsafeBitCast(endpointSymbol, to: MakeEndpoint.self)
+    let makeConnection = unsafeBitCast(connectionSymbol, to: MakeConnection.self)
+    let enableSimulator = unsafeBitCast(simulatorSymbol, to: EnableSimulator.self)
+    guard let endpoint = makeEndpoint(port, 0, 0)?.takeRetainedValue() as? xpc_object_t,
+          let connection = makeConnection(endpoint)?.takeRetainedValue() as? xpc_connection_t else {
+      throw HIDError.simulatorKitUnavailable("DTUHID connection creation failed")
+    }
+    self.connection = connection
+    // Without sim2host mode the guest can accept the connection but never receive its messages.
+    enableSimulator(connection)
+    xpc_connection_set_target_queue(connection, replyQueue)
+    xpc_connection_set_event_handler(connection) { event in
+      if xpc_get_type(event) == XPC_TYPE_ERROR {
+        let description = xpc_copy_description(event)
+        defer { free(description) }
+        Log.message("Home transport: \(String(cString: description))")
+      }
+    }
+    xpc_connection_resume(connection)
+    // A successful lookup can precede dtuhidd startup; require a harmless round-trip before sending Home.
+    let done = DispatchSemaphore(value: 0)
+    let probe = envelope(type: "IndigoKeyboardButtonEvent", barrier: true)
+    let payload = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_uint64(payload, "usageCode", 0)
+    xpc_dictionary_set_uint64(payload, "state", 2)
+    xpc_dictionary_set_value(probe, "payload", payload)
+    let result = HomeProbeResult()
+    xpc_connection_send_message_with_reply(connection, probe, replyQueue) { reply in
+      result.ok = xpc_get_type(reply) != XPC_TYPE_ERROR
+      done.signal()
+    }
+    guard done.wait(timeout: .now() + 4) == .success, result.ok else {
+      xpc_connection_cancel(connection)
+      throw HIDError.simulatorKitUnavailable("DTUHID did not answer the Home input probe")
+    }
+    // The liveness reply precedes the guest opening its HID device.
+    Thread.sleep(forTimeInterval: 0.2)
+  }
+
+  deinit { xpc_connection_cancel(connection) }
+
+  func press(count: Int) {
+    for index in 0..<count {
+      if index > 0 { Thread.sleep(forTimeInterval: 0.05) }
+      send(state: 1)
+      Thread.sleep(forTimeInterval: 0.05)
+      send(state: 2)
+    }
+    Thread.sleep(forTimeInterval: 0.08)
+  }
+
+  private func send(state: UInt64) {
+    let message = envelope(type: "IndigoButtonEvent", barrier: false)
+    // dtuhidd decodes these fields as unsigned integers, not strings or signed integers.
+    let payload = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_uint64(payload, "usagePage", 0x0C)
+    xpc_dictionary_set_uint64(payload, "usageCode", 0x40)
+    xpc_dictionary_set_uint64(payload, "state", state)
+    xpc_dictionary_set_value(message, "payload", payload)
+    xpc_connection_send_message(connection, message)
+  }
+
+  private func envelope(type: String, barrier: Bool) -> xpc_object_t {
+    let message = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(message, "messageType", type)
+    xpc_dictionary_set_string(message, "featureIdentifier", Self.service)
+    xpc_dictionary_set_bool(message, "isBarrier", barrier)
+    return message
+  }
+}
+
+// The reply writes before signaling; the waiting thread reads only after a successful wait.
+private final class HomeProbeResult: @unchecked Sendable {
+  var ok = false
 }

@@ -157,19 +157,7 @@ stdin is newline-delimited JSON, one object per line. Coordinates are in Simulat
 {"type":"quality","bitrate":2500000,"fps":24}
 ```
 
-`keyframe` is coalesced if several requests arrive before the next cadence tick. `quality` updates
-the VideoToolbox bitrate and/or the CFR timer without restarting the process. `shake` posts
-`com.apple.UIKit.SimulatorShake` through `simctl`. `touch` streams one externally driven touch:
-`down`, any number of `move` events, then `up`, with the trajectory and timing fully controlled by
-the parent — this is how curved swipes, drags with pauses, and long presses are performed. While a
-streamed touch is active, `tap` and `swipe` are dropped; a streamed touch left down is released
-automatically on shutdown. A `move` or `up` with no active streamed touch is ignored **silently**:
-the parent's channel may be lossy and clients are expected to send `up` redundantly, so stray
-events are steady-state traffic, not errors. Touch, `home`, `app_switcher`, and `key` all go through
-SimulatorKit's Indigo HID path: `home` presses the hardware Home button; `app_switcher` opens the
-running-apps switcher via a double Home press; `key` presses a USB HID
-keyboard usage code (page 0x07) with an optional `shift`, so the simulator's active hardware layout
-selects the glyph (the caller maps its key names to usage codes).
+`keyframe` is coalesced if several requests arrive before the next cadence tick. `quality` updates the VideoToolbox bitrate and/or the CFR timer without restarting the process. `shake` posts `com.apple.UIKit.SimulatorShake` through `simctl`. `touch` streams one externally driven touch: `down`, any number of `move` events, then `up`, with the trajectory and timing fully controlled by the parent — this is how curved swipes, drags with pauses, and long presses are performed. While a streamed touch is active, `tap` and `swipe` are dropped; a streamed touch left down is released automatically on shutdown. A `move` or `up` with no active streamed touch is ignored **silently**: the parent's channel may be lossy and clients are expected to send `up` redundantly, so stray events are steady-state traffic, not errors. Touch and `key` go through SimulatorKit's Indigo HID path. `home` presses the hardware Home button and `app_switcher` opens the running-apps switcher via a double Home press; these use DTUHID on iOS 27 runtimes and Indigo on older runtime families. `key` presses a USB HID keyboard usage code (page 0x07) with an optional `shift`, so the simulator's active hardware layout selects the glyph (the caller maps its key names to usage codes).
 
 ## idb attribution
 
@@ -196,3 +184,9 @@ for framebuffer geometry. This separation also matches Xcode 27's resizable Simu
 model: a changed surface size is consumed directly, while orientation remains metadata. Xcode 27
 should receive a dedicated compatibility pass before production use because its private framework
 surface and resize behavior may change between releases.
+
+## Xcode 27 compatibility
+
+SimulatorKit discovery also checks `Contents/SharedFrameworks`, where Xcode 27 installs the framework. On iOS 27 runtimes, Home and the app switcher use the simulator's DTUHID service because legacy Indigo button events can report successful delivery without affecting the guest. The DTUHID connection is created on the first Home or app-switcher command, probes liveness with a four-second deadline, and is released on disconnect. Failed connection attempts are logged and retried on the next command. Other input commands and older runtime families retain the existing Indigo path.
+
+This is not a complete Xcode 27 compatibility pass: cold-boot DTUHID recovery, other runtime families under Xcode 27, and live resize need separate validation.
